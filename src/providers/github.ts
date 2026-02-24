@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
-import { mkdirSync, rmSync } from "node:fs";
+import { cpSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import type { ParsedGitHubSource } from "../core/types.js";
 
@@ -32,9 +32,73 @@ export function parseGitHubSource(input: string): ParsedGitHubSource | null {
   return null;
 }
 
+/** Check whether the `gh` CLI is available on PATH. */
+export function hasGhCli(): boolean {
+  try {
+    execFileSync("gh", ["--version"], { stdio: "pipe" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Validate that a GitHub repository exists using `gh api`. */
+export function validateRepoWithGh(owner: string, repo: string): boolean {
+  try {
+    execFileSync("gh", ["api", `repos/${owner}/${repo}`, "--silent"], {
+      stdio: "pipe",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** List contents of a path in a repo using `gh api` (returns parsed JSON). */
+export function listRepoContents(
+  owner: string,
+  repo: string,
+  path?: string,
+  ref?: string,
+): Array<{ name: string; type: string; path: string }> {
+  const endpoint = path
+    ? `repos/${owner}/${repo}/contents/${path}`
+    : `repos/${owner}/${repo}/contents`;
+  const refArgs = ref ? ["-f", `ref=${ref}`] : [];
+  const out = execFileSync("gh", ["api", endpoint, ...refArgs], {
+    stdio: "pipe",
+    encoding: "utf-8",
+  });
+  return JSON.parse(out);
+}
+
+function cloneWithGit(
+  repoUrl: string,
+  targetDir: string,
+  branchArgs: string[],
+): void {
+  execFileSync(
+    "git",
+    ["clone", "--depth", "1", ...branchArgs, repoUrl, targetDir],
+    { stdio: "pipe" },
+  );
+}
+
+function cloneWithGh(
+  owner: string,
+  repo: string,
+  targetDir: string,
+): void {
+  execFileSync(
+    "gh",
+    ["repo", "clone", `${owner}/${repo}`, targetDir, "--", "--depth", "1"],
+    { stdio: "pipe" },
+  );
+}
+
 export function cloneGitHubSource(
   source: ParsedGitHubSource,
-  targetDir: string
+  targetDir: string,
 ): void {
   const repoUrl = `https://github.com/${source.owner}/${source.repo}.git`;
   mkdirSync(targetDir, { recursive: true });
@@ -56,24 +120,32 @@ export function cloneGitHubSource(
         repoUrl,
         tmp,
       ],
-      { stdio: "pipe" }
+      { stdio: "pipe" },
     );
     execFileSync(
       "git",
       ["-C", tmp, "sparse-checkout", "set", source.subdir],
-      { stdio: "pipe" }
+      { stdio: "pipe" },
     );
 
+    // Copy the *contents* of the subfolder into targetDir (not the folder itself).
+    // Previously used `cp -r srcDir targetDir` which nested the dir inside targetDir.
     const srcDir = join(tmp, source.subdir);
-    execFileSync("cp", ["-r", srcDir, targetDir], { stdio: "pipe" });
+    cpSync(srcDir, targetDir, { recursive: true });
     rmSync(tmp, { recursive: true, force: true });
   } else {
     const branchArgs = source.branch ? ["-b", source.branch] : [];
-    execFileSync(
-      "git",
-      ["clone", "--depth", "1", ...branchArgs, repoUrl, targetDir],
-      { stdio: "pipe" }
-    );
+    try {
+      cloneWithGit(repoUrl, targetDir, branchArgs);
+    } catch {
+      if (hasGhCli()) {
+        cloneWithGh(source.owner, source.repo, targetDir);
+      } else {
+        throw new Error(
+          `git clone failed and gh CLI is not available. Install git or gh to continue.`,
+        );
+      }
+    }
     rmSync(join(targetDir, ".git"), { recursive: true, force: true });
   }
 }

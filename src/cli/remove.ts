@@ -1,57 +1,43 @@
+import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { rmSync, existsSync } from "node:fs";
 import { Command } from "commander";
-import { getDetectedAgents, getAgentByName } from "../agents/index.js";
-import {
-  readProjectConfig,
-  writeProjectConfig,
-  readGlobalConfig,
-  writeGlobalConfig,
-} from "../core/config.js";
-import type { AgentAdapter } from "../core/types.js";
+import { allAgents } from "../agents/index.js";
+import { readProjectConfig, writeProjectConfig, readGlobalConfig, writeGlobalConfig } from "../core/config.js";
 import * as log from "../core/utils.js";
 
 export const removeCommand = new Command("remove")
+  .argument("<name>", "Name of the skill to remove")
   .description("Remove an installed skill")
-  .argument("<name>", "Skill name to remove")
-  .option("-g, --global", "Remove global skill", false)
+  .option("-g, --global", "Remove from global", false)
   .action((name: string, opts: { global: boolean }) => {
-    const agents: AgentAdapter[] = opts.global
-      ? getDetectedAgents()
-      : (() => {
-          const config = readProjectConfig();
-          return (
-            config?.agents
-              .map((n) => getAgentByName(n))
-              .filter((a): a is AgentAdapter => !!a) ||
-            getDetectedAgents()
-          );
-        })();
+    const config = opts.global ? readGlobalConfig() : readProjectConfig();
+    const skills = config?.skills ?? [];
+    const skill = skills.find((s) => s.name === name);
 
-    let removed = false;
-    for (const agent of agents) {
-      const dir = join(agent.getSkillsDir(opts.global), name);
-      if (existsSync(dir)) {
-        rmSync(dir, { recursive: true, force: true });
-        log.success(`Removed '${name}' from ${agent.name}`);
-        removed = true;
+    if (!skill) {
+      log.error(`Skill "${name}" not found in ${opts.global ? "global" : "project"} config.`);
+      process.exit(1);
+    }
+
+    // Remove skill directory from all agents
+    for (const agent of allAgents) {
+      const skillDir = join(agent.getSkillsDir(opts.global), name);
+      if (existsSync(skillDir)) {
+        rmSync(skillDir, { recursive: true, force: true });
+        log.success(`Removed ${skillDir}`);
       }
     }
 
-    if (!removed) {
-      log.warn(`Skill '${name}' not found.`);
-      return;
-    }
-
+    // Update config
+    const updatedSkills = skills.filter((s) => s.name !== name);
     if (opts.global) {
-      const config = readGlobalConfig();
-      config.skills = config.skills.filter((s) => s.name !== name);
-      writeGlobalConfig(config);
+      writeGlobalConfig({ skills: updatedSkills });
     } else {
-      const config = readProjectConfig();
-      if (config) {
-        config.skills = config.skills.filter((s) => s.name !== name);
-        writeProjectConfig(config);
-      }
+      writeProjectConfig({
+        agents: (config && "agents" in config ? config.agents : []) as string[],
+        skills: updatedSkills,
+      });
     }
+
+    log.success(`Removed skill "${name}"`);
   });
